@@ -1,8 +1,10 @@
 import argparse
 import cv2
-import numpy as np 
+import numpy as np
 import os
+from glob import glob
 import shutil
+import rasterio
 from sklearn.cluster import KMeans
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
@@ -14,6 +16,8 @@ from sklearn.utils.multiclass import unique_labels
 from sklearn.metrics.pairwise import chi2_kernel
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score
+import warnings
+warnings.filterwarnings("ignore")
 
 
 def getFiles(train, path):
@@ -39,14 +43,26 @@ def getDescriptors(sift, img):
 
 
 def readImage(img_path):
-    img = cv2.imread(img_path, 0)
+    img = cv2.imread(img_path, 1)  # w, h, b
     return cv2.resize(img, (150, 150))  # w,h/ cv.read(h, w)
+    # 返回的是150*150*3的数组
+
+
+def readRSimage(img_path):
+    img = rasterio.open(img_path)
+    band = img.read()  # b, h, w
+    # print(band.shape)
+    band = (band[:3, :, :]).transpose(2, 1, 0)
+    # print(band.shape)
+    # print(cv2.resize(band, (150, 150)).shape)
+    # return cv2.resize(band, (150, 150))
+    return band
 
 
 def vstackDescriptors(descriptor_list):
     descriptors = np.array(descriptor_list[0])
     for descriptor in descriptor_list[1:]:
-        descriptors = np.vstack((descriptors, descriptor)) 
+        descriptors = np.vstack((descriptors, descriptor))
 
     return descriptors
 
@@ -98,29 +114,29 @@ def findSVM(im_features, train_labels, kernel):
     features = im_features
     if kernel == "precomputed":
         features = np.dot(im_features, im_features.T)  # np.dot(a, b)矩阵乘法
-    
+
     params = svcParamSelection(features, train_labels, kernel, 5)
     C_param, gamma_param = params.get("C"), params.get("gamma")
     print(C_param, gamma_param)
     class_weight = {
-        0: (807 / (7 * 140)),
-        1: (807 / (7 * 140)),
-        2: (807 / (7 * 133)),
-        3: (807 / (7 * 70)),
-        4: (807 / (7 * 42)),
-        5: (807 / (7 * 140)),
-        6: (807 / (7 * 142)) 
+        0: (161 / (3 * 58)),
+        1: (161 / (3 * 67)),
+        2: (161 / (3 * 36)),
+        # 3: (807 / (7 * 70)),
+        # 4: (807 / (7 * 42)),
+        # 5: (807 / (7 * 140)),
+        # 6: (807 / (7 * 142))
     }
-  
+
     svm = SVC(kernel=kernel, C=C_param, gamma=gamma_param, class_weight=class_weight)
     svm.fit(features, train_labels)
     return svm
 
 
 def plotConfusionMatrix(y_true, y_pred, classes,
-                          normalize=False,
-                          title=None,
-                          cmap=plt.cm.Blues):
+                        normalize=False,
+                        title=None,
+                        cmap=plt.cm.Blues):
     if not title:
         if normalize:
             title = 'Normalized confusion matrix'
@@ -163,12 +179,13 @@ def plotConfusionMatrix(y_true, y_pred, classes,
 def plotConfusions(true, predictions):
     np.set_printoptions(precision=2)
 
-    class_names = ["city", "face", "green", "house_building", "house_indoor", "office", "sea"]
+    # class_names = ["city", "face", "green", "house_building", "house_indoor", "office", "sea"]
+    class_names = ["mountain", "other", "PV"]
     plotConfusionMatrix(true, predictions, classes=class_names,
-                      title='Confusion matrix, without normalization')
+                        title='Confusion matrix, without normalization')
 
     plotConfusionMatrix(true, predictions, classes=class_names, normalize=True,
-                      title='Normalized confusion matrix')
+                        title='Normalized confusion matrix')
 
     plt.show()
 
@@ -178,32 +195,45 @@ def findAccuracy(true, predictions):
 
 
 def trainModel(path, no_clusters, kernel):
-    images = getFiles(True, path)
+    # images = getFiles(True, path)
+    images = glob(path + r"/**/*.tif")
     print("Train images path detected.")
     sift = cv2.xfeatures2d.SIFT_create()  # 实例化sift
     descriptor_list = []
     train_labels = np.array([])
-    label_count = 7
+    label_count = 3  # 修改分类类别数
     image_count = len(images)  # 训练样本总数807
+    print("训练样本总数为：{}".format(image_count))
 
     for img_path in images:
-        if "city" in img_path:
+        if "Thumb.db" in img_path:
+            continue
+        elif "mountain" in img_path:
             class_index = 0
-        elif "face" in img_path:
+        elif "others" in img_path:
             class_index = 1
-        elif "green" in img_path:
-            class_index = 2
-        elif "house_building" in img_path:
-            class_index = 3
-        elif "house_indoor" in img_path:
-            class_index = 4
-        elif "office" in img_path:
-            class_index = 5
         else:
-            class_index = 6
+            class_index = 2
+
+        # for img_path in images:
+        #     if "city" in img_path:
+        #         class_index = 0
+        #     elif "face" in img_path:
+        #         class_index = 1
+        #     elif "green" in img_path:
+        #         class_index = 2
+        #     elif "house_building" in img_path:
+        #         class_index = 3
+        #     elif "house_indoor" in img_path:
+        #         class_index = 4
+        #     elif "office" in img_path:
+        #         class_index = 5
+        #     else:
+        #         class_index = 6
 
         train_labels = np.append(train_labels, class_index)
-        img = readImage(img_path)
+        # img = readImage(img_path)  # 读取普通图像
+        img = readRSimage(img_path)  # 读取栅格图像
         des = getDescriptors(sift, img)
         descriptor_list.append(des)
 
@@ -216,7 +246,7 @@ def trainModel(path, no_clusters, kernel):
     im_features = extractFeatures(kmeans, descriptor_list, image_count, no_clusters)
     print("Images features extracted.")
 
-    scale = StandardScaler().fit(im_features)        
+    scale = StandardScaler().fit(im_features)
     im_features = scale.transform(im_features)
     print("Train images normalized.")
 
@@ -231,7 +261,8 @@ def trainModel(path, no_clusters, kernel):
 
 
 def testModel(path, kmeans, scale, svm, im_features, no_clusters, kernel):
-    test_images = getFiles(False, path)
+    # test_images = getFiles(False, path)
+    test_images = glob(path + r"/**/*.tif")
     print("Test images path detected.")
 
     count = 0
@@ -239,50 +270,58 @@ def testModel(path, kmeans, scale, svm, im_features, no_clusters, kernel):
     descriptor_list = []
 
     name_dict = {
-        "0": "city",
-        "1": "face",
-        "2": "green",
-        "3": "house_building",
-        "4": "house_indoor",
-        "5": "office",
-        "6": "sea"
+        "0": "mountain",
+        "1": "others",
+        "2": "PV",
+        # "3": "house_building",
+        # "4": "house_indoor",
+        # "5": "office",
+        # "6": "sea"
     }
 
     sift = cv2.xfeatures2d.SIFT_create()
 
     for img_path in test_images:
-        img = readImage(img_path)
+        # img = readImage(img_path)
+        img = readRSimage(img_path)
         des = getDescriptors(sift, img)
 
         if des is not None:
             count += 1
             descriptor_list.append(des)
 
-            if "city" in img_path:
-                true.append("city")
-            elif "face" in img_path:
-                true.append("face")
-            elif "green" in img_path:
-                true.append("green")
-            elif "house_building" in img_path:
-                true.append("house_building")
-            elif "house_indoor" in img_path:
-                true.append("house_indoor")
-            elif "office" in img_path:
-                true.append("office")
+            if "mountain" in img_path:
+                true.append("mountain")
+            elif "others" in img_path:
+                true.append("others")
             else:
-                true.append("sea")
+                true.append("PV")
+
+            # if "city" in img_path:
+            #     true.append("city")
+            # elif "face" in img_path:
+            #     true.append("face")
+            # elif "green" in img_path:
+            #     true.append("green")
+            # elif "house_building" in img_path:
+            #     true.append("house_building")
+            # elif "house_indoor" in img_path:
+            #     true.append("house_indoor")
+            # elif "office" in img_path:
+            #     true.append("office")
+            # else:
+            #     true.append("sea")
 
     descriptors = vstackDescriptors(descriptor_list)
 
     test_features = extractFeatures(kmeans, descriptor_list, count, no_clusters)
 
     test_features = scale.transform(test_features)
-    
+
     kernel_test = test_features
     if kernel == "precomputed":
         kernel_test = np.dot(test_features, im_features.T)
-    
+
     predictions = [name_dict[str(int(i))] for i in svm.predict(kernel_test)]
     print("Test images classified.")
 
@@ -295,26 +334,33 @@ def testModel(path, kmeans, scale, svm, im_features, no_clusters, kernel):
 
 
 def preModel(path, pre_path, kmeans, scale, svm, im_features, no_clusters, kernel):
-    target_images = getFiles(False, path)
+    # target_images = getFiles(False, path)
+    target_images = glob(path + '/*.tif')
     print("Target images path detected.")
 
     count = 0
     descriptor_list = []
 
     name_dict = {
-        "0": "city",
-        "1": "face",
-        "2": "green",
-        "3": "house_building",
-        "4": "house_indoor",
-        "5": "office",
-        "6": "sea"
+        "0": "mountain",
+        "1": "others",
+        "2": "PV",
     }
+    # name_dict = {
+    #     "0": "city",
+    #     "1": "face",
+    #     "2": "green",
+    #     "3": "house_building",
+    #     "4": "house_indoor",
+    #     "5": "office",
+    #     "6": "sea"
+    # }
 
     sift = cv2.xfeatures2d.SIFT_create()
 
     for img_path in target_images:
-        img = readImage(img_path)
+        # img = readImage(img_path)  # 读取普通图像
+        img = readRSimage(img_path)  # 读取栅格图像
         des = getDescriptors(sift, img)
 
         if des is not None:
@@ -335,52 +381,73 @@ def preModel(path, pre_path, kmeans, scale, svm, im_features, no_clusters, kerne
     print("Target images classified.")
 
     for number, target_category in enumerate(predictions):
-        if target_category == 'city':
-            shutil.copy(target_images[number], pre_path + '/city/')
-            print("成功将第{}个文件移入city文件夹中".format(number+1))
-        elif target_category == 'face':
-            shutil.copy(target_images[number], pre_path + '/face/')
-            print("成功将第{}个文件移入face文件夹中".format(number+1))
-        elif target_category == 'green':
-            shutil.copy(target_images[number], pre_path + '/green/')
-            print("成功将第{}个文件移入green文件夹中".format(number+1))
-        elif target_category == 'house_building':
-            shutil.copy(target_images[number], pre_path + '/house_building/')
-            print("成功将第{}个文件移入house_building文件夹中".format(number+1))
-        elif target_category == 'house_indoor':
-            shutil.copy(target_images[number], pre_path + '/house_indoor/')
-            print("成功将第{}个文件移入house_indoor文件夹中".format(number+1))
-        elif target_category == 'office':
-            shutil.copy(target_images[number], pre_path + '/office/')
-            print("成功将第{}个文件移入office文件夹中".format(number+1))
+        if target_category == 'mountain':
+            shutil.copy(target_images[number], pre_path + '/mountain/')
+            print("成功将第{}个文件移入mountain文件夹中".format(number + 1))
+        elif target_category == 'other':
+            shutil.copy(target_images[number], pre_path + '/other/')
+            print("成功将第{}个文件移入other文件夹中".format(number + 1))
         else:
-            shutil.copy(target_images[number], pre_path + '/sea/')
-            print("成功将第{}个文件移入sea文件夹中".format(number+1))
+            shutil.copy(target_images[number], pre_path + '/PV/')
+            print("成功将第{}个文件移入PV文件夹中".format(number + 1))
+
+        # if target_category == 'city':
+        #     shutil.copy(target_images[number], pre_path + '/city/')
+        #     print("成功将第{}个文件移入city文件夹中".format(number + 1))
+        # elif target_category == 'face':
+        #     shutil.copy(target_images[number], pre_path + '/face/')
+        #     print("成功将第{}个文件移入face文件夹中".format(number + 1))
+        # elif target_category == 'green':
+        #     shutil.copy(target_images[number], pre_path + '/green/')
+        #     print("成功将第{}个文件移入green文件夹中".format(number + 1))
+        # elif target_category == 'house_building':
+        #     shutil.copy(target_images[number], pre_path + '/house_building/')
+        #     print("成功将第{}个文件移入house_building文件夹中".format(number + 1))
+        # elif target_category == 'house_indoor':
+        #     shutil.copy(target_images[number], pre_path + '/house_indoor/')
+        #     print("成功将第{}个文件移入house_indoor文件夹中".format(number + 1))
+        # elif target_category == 'office':
+        #     shutil.copy(target_images[number], pre_path + '/office/')
+        #     print("成功将第{}个文件移入office文件夹中".format(number + 1))
+        # else:
+        #     shutil.copy(target_images[number], pre_path + '/sea/')
+        #     print("成功将第{}个文件移入sea文件夹中".format(number + 1))
     print("Classification completed!")
 
 
 def execute(train_path, test_path, no_clusters, kernel, target_path, pre_path):
     kmeans, scale, svm, im_features = trainModel(train_path, no_clusters, kernel)
-    # testModel(test_path, kmeans, scale, svm, im_features, no_clusters, kernel)
+    testModel(test_path, kmeans, scale, svm, im_features, no_clusters, kernel)
     preModel(target_path, pre_path, kmeans, scale, svm, im_features, no_clusters, kernel)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-
-    parser.add_argument('--train_path', action='store', dest='train_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/train')
-    parser.add_argument('--test_path', action='store', dest='test_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/test')
-    parser.add_argument('--target_path', action='store', dest='target_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/target')
-    parser.add_argument('--pre_path', action='store', dest='pre_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/pred')
+    # 原始参数
+    # parser.add_argument('--train_path', action='store', dest='train_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/train')
+    # parser.add_argument('--test_path', action='store', dest='test_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/test')
+    # parser.add_argument('--target_path', action='store', dest='target_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/target')
+    # parser.add_argument('--pre_path', action='store', dest='pre_path', default='C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/pred')
+    # parser.add_argument('--no_clusters', action="store", dest="no_clusters", default=50)
+    # parser.add_argument('--kernel_type', action="store", dest="kernel_type", default="linear")
+    # parser.add_argument('--kernel_type', action="store", dest="kernel_type", default="precomputed")
+    # 遥感影像参数
+    parser.add_argument('--train_path', action='store', dest='train_path', default='G:/bags_dataset/train')
+    parser.add_argument('--test_path', action='store', dest='test_path', default='G:/bags_dataset/train')
+    parser.add_argument('--target_path', action='store', dest='target_path', default='G:/bags_dataset/target')
+    parser.add_argument('--pre_path', action='store', dest='pre_path', default='G:/bags_dataset/pred')
     parser.add_argument('--no_clusters', action="store", dest="no_clusters", default=50)
     parser.add_argument('--kernel_type', action="store", dest="kernel_type", default="linear")
     # parser.add_argument('--kernel_type', action="store", dest="kernel_type", default="precomputed")
 
     args = vars(parser.parse_args())  # 解析参数
-    if not(args['kernel_type'] == "linear" or args['kernel_type'] == "precomputed"):
+    if not (args['kernel_type'] == "linear" or args['kernel_type'] == "precomputed"):
         print("Kernel type must be either linear or precomputed")
         exit(0)
 
-    execute(args['train_path'], args['test_path'], int(args['no_clusters']), args['kernel_type'],
+    execute(args['train_path'], args['train_path'], int(args['no_clusters']), args['kernel_type'],
             args['target_path'], args['pre_path'])
-    # getFiles(False, args['target_path'])
+    # testpath = 'G:/bags_dataset/train/mountain/mountain_1.tif'
+    # readRSimage(testpath)
+    # imgpath = 'C:/Users/gefan/PycharmProjects/cluster2/bag_of_visual_words/Bag-of-Visual-Words/dataset/train/city/city-001.jpg'
+    # readImage(imgpath)
